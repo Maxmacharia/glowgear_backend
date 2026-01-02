@@ -8,9 +8,39 @@ from app.core.deps import get_db
 from app.models.item import Item
 from app.models.receipt import Receipt, ReceiptItem
 from app.models.inventory_transaction import InventoryTransaction
-from app.schemas.receipt import ReceiptCreate, ReceiptResponse
+from app.schemas.receipt import (
+    ReceiptCreate,
+    ReceiptResponse,
+    ReceiptItemResponse,
+)
 
 router = APIRouter(prefix="/receipts", tags=["Receipts"])
+
+
+# -------------------------------
+# HELPER: BUILD RESPONSE
+# -------------------------------
+def build_receipt_response(receipt: Receipt) -> ReceiptResponse:
+    items = []
+
+    for ri in receipt.items:
+        items.append(
+            ReceiptItemResponse(
+                item_id=ri.item_id,
+                item_name=ri.item.name,
+                quantity=ri.quantity,
+                selling_price=float(ri.selling_price),
+                line_total=float(ri.selling_price * ri.quantity),
+            )
+        )
+
+    return ReceiptResponse(
+        id=receipt.id,
+        client_name=receipt.client_name,
+        total_amount=float(receipt.total_amount),
+        created_at=receipt.created_at,
+        items=items,
+    )
 
 
 # -------------------------------
@@ -22,14 +52,14 @@ def create_receipt(receipt: ReceiptCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Receipt must contain items")
 
     total_amount = Decimal("0.00")
-    total_profit = Decimal("0.00")
 
     receipt_db = Receipt(
+        client_name=receipt.client_name,
         total_amount=Decimal("0.00"),
-        total_profit=Decimal("0.00"),
     )
+
     db.add(receipt_db)
-    db.flush()  # ensures receipt_db.id exists
+    db.flush()
 
     for entry in receipt.items:
         item = db.query(Item).filter(Item.id == entry.item_id).first()
@@ -42,14 +72,11 @@ def create_receipt(receipt: ReceiptCreate, db: Session = Depends(get_db)):
                 detail=f"Insufficient stock for {item.name}"
             )
 
-        # 🔻 Deduct stock immediately
+        # 🔻 Deduct stock
         item.quantity -= entry.quantity
 
         line_total = Decimal(str(entry.selling_price)) * entry.quantity
-        profit = (Decimal(str(entry.selling_price)) - Decimal(str(item.cost_price))) * entry.quantity
-
         total_amount += line_total
-        total_profit += profit
 
         db.add(
             ReceiptItem(
@@ -57,7 +84,6 @@ def create_receipt(receipt: ReceiptCreate, db: Session = Depends(get_db)):
                 item_id=item.id,
                 quantity=entry.quantity,
                 selling_price=Decimal(str(entry.selling_price)),
-                cost_price=item.cost_price,
             )
         )
 
@@ -70,11 +96,11 @@ def create_receipt(receipt: ReceiptCreate, db: Session = Depends(get_db)):
         )
 
     receipt_db.total_amount = total_amount
-    receipt_db.total_profit = total_profit
 
     db.commit()
     db.refresh(receipt_db)
-    return receipt_db
+
+    return build_receipt_response(receipt_db)
 
 
 # -------------------------------
@@ -85,12 +111,17 @@ def get_receipts(
     receipt_date: date | None = None,
     db: Session = Depends(get_db),
 ):
-    query = db.query(Receipt).options(joinedload(Receipt.items))
+    query = (
+        db.query(Receipt)
+        .options(joinedload(Receipt.items).joinedload(ReceiptItem.item))
+    )
 
     if receipt_date:
         query = query.filter(func.date(Receipt.created_at) == receipt_date)
 
-    return query.order_by(Receipt.created_at.desc()).all()
+    receipts = query.order_by(Receipt.created_at.desc()).all()
+
+    return [build_receipt_response(r) for r in receipts]
 
 
 # -------------------------------
@@ -102,23 +133,25 @@ def update_receipt(
     receipt: ReceiptCreate,
     db: Session = Depends(get_db),
 ):
-    db_receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not db_receipt:
+    receipt_db = (
+        db.query(Receipt)
+        .options(joinedload(Receipt.items))
+        .filter(Receipt.id == receipt_id)
+        .first()
+    )
+
+    if not receipt_db:
         raise HTTPException(status_code=404, detail="Receipt not found")
 
-    # 🔁 Restore old stock
-    old_items = db.query(ReceiptItem).filter(
-        ReceiptItem.receipt_id == receipt_id
-    ).all()
-
-    for old in old_items:
-        item = db.query(Item).filter(Item.id == old.item_id).first()
-        item.quantity += old.quantity
+    # 🔁 Restore stock
+    for ri in receipt_db.items:
+        item = db.query(Item).filter(Item.id == ri.item_id).first()
+        item.quantity += ri.quantity
 
         db.add(
             InventoryTransaction(
                 item_id=item.id,
-                quantity_change=old.quantity,
+                quantity_change=ri.quantity,
                 reason="receipt_update_restore",
             )
         )
@@ -128,9 +161,7 @@ def update_receipt(
     ).delete()
 
     total_amount = Decimal("0.00")
-    total_profit = Decimal("0.00")
 
-    # 🔻 Apply new items
     for entry in receipt.items:
         item = db.query(Item).filter(Item.id == entry.item_id).first()
         if not item or item.quantity < entry.quantity:
@@ -139,10 +170,7 @@ def update_receipt(
         item.quantity -= entry.quantity
 
         line_total = Decimal(str(entry.selling_price)) * entry.quantity
-        profit = (Decimal(str(entry.selling_price)) - Decimal(str(item.cost_price))) * entry.quantity
-
         total_amount += line_total
-        total_profit += profit
 
         db.add(
             ReceiptItem(
@@ -150,7 +178,6 @@ def update_receipt(
                 item_id=item.id,
                 quantity=entry.quantity,
                 selling_price=Decimal(str(entry.selling_price)),
-                cost_price=item.cost_price,
             )
         )
 
@@ -162,12 +189,13 @@ def update_receipt(
             )
         )
 
-    db_receipt.total_amount = total_amount
-    db_receipt.total_profit = total_profit
+    receipt_db.client_name = receipt.client_name
+    receipt_db.total_amount = total_amount
 
     db.commit()
-    db.refresh(db_receipt)
-    return db_receipt
+    db.refresh(receipt_db)
+
+    return build_receipt_response(receipt_db)
 
 
 # -------------------------------
@@ -175,16 +203,17 @@ def update_receipt(
 # -------------------------------
 @router.delete("/{receipt_id}")
 def delete_receipt(receipt_id: str, db: Session = Depends(get_db)):
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    receipt = (
+        db.query(Receipt)
+        .options(joinedload(Receipt.items))
+        .filter(Receipt.id == receipt_id)
+        .first()
+    )
+
     if not receipt:
         raise HTTPException(status_code=404, detail="Receipt not found")
 
-    items = db.query(ReceiptItem).filter(
-        ReceiptItem.receipt_id == receipt_id
-    ).all()
-
-    # 🔁 Restore stock
-    for ri in items:
+    for ri in receipt.items:
         item = db.query(Item).filter(Item.id == ri.item_id).first()
         item.quantity += ri.quantity
 
@@ -195,10 +224,6 @@ def delete_receipt(receipt_id: str, db: Session = Depends(get_db)):
                 reason="receipt_delete",
             )
         )
-
-    db.query(ReceiptItem).filter(
-        ReceiptItem.receipt_id == receipt_id
-    ).delete()
 
     db.delete(receipt)
     db.commit()

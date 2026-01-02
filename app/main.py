@@ -14,7 +14,8 @@ app = FastAPI(title="Inventory & Accounting System")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite
+    allow_origins=["http://localhost:5173", 
+                   "https://glowgear-front.vercel.app/"],  # Vite
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
