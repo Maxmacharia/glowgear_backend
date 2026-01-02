@@ -8,7 +8,7 @@ from app.routers.receipt import router as receipt_router
 from app.routers.invoice import router as invoice_router
 from app.routers.report import router as report_router
 
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Inventory & Accounting System")
 
