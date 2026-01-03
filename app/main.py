@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.core.database import Base, engine
 
 from app.routers.item import router as item_router
@@ -8,14 +9,18 @@ from app.routers.receipt import router as receipt_router
 from app.routers.invoice import router as invoice_router
 from app.routers.report import router as report_router
 
-# Base.metadata.create_all(bind=engine)
-
 app = FastAPI(title="Inventory & Accounting System")
 
+# ✅ CREATE TABLES (REQUIRED ON RENDER)
+Base.metadata.create_all(bind=engine)
+
+# ✅ FIXED CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", 
-                   "https://glowgear-front.vercel.app/"],  # Vite
+    allow_origins=[
+        "http://localhost:5173",
+        "https://glowgear-front-ccg6.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
