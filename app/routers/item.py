@@ -52,9 +52,18 @@ def update_item(
 @router.delete("/{item_id}")
 def delete_item(item_id: str, db: Session = Depends(get_db)):
     item = db.query(Item).filter(Item.id == item_id).first()
+
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
 
-    db.delete(item)
-    db.commit()
+    try:
+        db.delete(item)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Item cannot be deleted because it is referenced in transactions"
+        )
+
     return {"message": "Item deleted successfully"}
